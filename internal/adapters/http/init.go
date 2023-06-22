@@ -3,19 +3,20 @@ package http
 import (
 	"DocumentAgreement/internal/adapters/entities"
 	"context"
-	"crypto/sha1"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"io"
 	"net/http"
+	"time"
 )
 
-const salt = "gqgwgd1g21gehwdwh08w7dbb1y2hshsdasd"
-
 type Auth interface {
-	SignUp(userAuth entities.UserAuth) (string, error)
-	SignIn(userAuth entities.UserAuth) (string, error)
-	NewRefreshToken() (string, error)
+	SignUp(ctx context.Context, userAuth entities.UserAuth) error
+	SignIn(ctx context.Context, userAuth entities.UserAuth) (entities.Tokens, error)
+	Verify(ctx context.Context, tokens entities.Tokens) (entities.Tokens, error)
+	Logout(ctx context.Context, tokens entities.Tokens) error
 }
 
 type Adapter struct {
@@ -28,59 +29,27 @@ func New(auth Auth) *Adapter {
 }
 
 func (a *Adapter) Start() error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/signIn", a.signIn)
-	mux.HandleFunc("/signUp", a.signUp)
+	r := chi.NewRouter()
 
-	//chi router почитать
+	r.Use(middleware.Timeout(10 * time.Second))
 
-	http.ListenAndServe(
-		":8080",
-		mux,
-	)
+	r.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ping"))
+	})
+
+	r.Route("/auth", func(r chi.Router) {
+		r.Post("/signUp", a.signUp)
+		r.Post("/signIn", a.signIn)
+		r.Post("/verify", a.verify)
+		r.Post("/logout", a.logout)
+	})
+
+	http.ListenAndServe(":8080", r)
 	return nil
 }
 
 func (a *Adapter) Stop(ctx context.Context) error {
 	return nil
-}
-
-func (a *Adapter) signIn(w http.ResponseWriter, r *http.Request) {
-	username, password, ok := r.BasicAuth()
-	if !ok {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	r.Body.Close()
-	password = GeneratePasswordHash(password)
-	var userAuth entities.UserAuth
-	userAuth.UserName = username
-	userAuth.Password = password
-	accessToken, err := a.auth.SignIn(userAuth)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	if accessToken == "Пользователя не существует" {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(accessToken))
-		return
-	}
-	refreshToken, err := a.auth.NewRefreshToken()
-	response, err := json.Marshal(map[string]interface{}{
-		"accessToken":  accessToken,
-		"refreshToken": refreshToken,
-	})
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	_, err = w.Write(response)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
 }
 
 func (a *Adapter) signUp(w http.ResponseWriter, r *http.Request) {
@@ -96,17 +65,101 @@ func (a *Adapter) signUp(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	userAuth.Password = GeneratePasswordHash(userAuth.Password)
-	response, err := a.auth.SignUp(userAuth)
+	err = a.auth.SignUp(r.Context(), userAuth)
+	if errors.Is(err, entities.ErrUserAlreadyExists) || errors.Is(err, entities.ErrInvalidUserCredentials) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
 	}
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(response))
+	//записать ID пользователя из контекста w.Write([]byte(err.Error()))
 }
+func (a *Adapter) signIn(w http.ResponseWriter, r *http.Request) {
+	username, password, ok := r.BasicAuth()
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	r.Body.Close()
+	var userAuth entities.UserAuth
+	userAuth.UserName = username
+	userAuth.Password = password
 
-func GeneratePasswordHash(password string) string {
-	hash := sha1.New()
-	hash.Write([]byte(password))
-	return fmt.Sprintf("%x", hash.Sum([]byte(salt)))
+	tokens, err := a.auth.SignIn(r.Context(), userAuth)
+	if errors.Is(err, entities.ErrUserNotFound) || errors.Is(err, entities.ErrInvalidUserCredentials) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(err.Error()))
+		return
+	}
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+	response, err := json.Marshal(map[string]interface{}{
+		"accessToken":  tokens.AccessToken,
+		"refreshToken": tokens.RefreshToken,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(response)
+}
+func (a *Adapter) verify(w http.ResponseWriter, r *http.Request) {
+	//TODO Вот эта штука должна идти не в теле а в bearer хедере
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	r.Body.Close()
+	var tokens entities.Tokens
+	err = json.Unmarshal(body, &tokens)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	tokens, err = a.auth.Verify(r.Context(), tokens)
+	if errors.Is(err, entities.ErrRefreshTokenInvalid) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	response, err := json.Marshal(map[string]interface{}{
+		"accessToken":  tokens.AccessToken,
+		"refreshToken": tokens.RefreshToken,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(response)
+}
+func (a *Adapter) logout(w http.ResponseWriter, r *http.Request) {
+	//TODO Вот эта штука должна идти не в теле а в bearer хедере
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	r.Body.Close()
+	var tokens entities.Tokens
+	err = json.Unmarshal(body, &tokens)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }

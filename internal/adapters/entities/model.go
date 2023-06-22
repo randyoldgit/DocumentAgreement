@@ -5,6 +5,12 @@ type Message struct {
 }
 
 type UserAuth struct {
-	UserName string `json:"login"`
+	UserID   int    `json:"userId"`
+	UserName string `json:"username"`
 	Password string `json:"password"`
+}
+
+type Tokens struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
 }
