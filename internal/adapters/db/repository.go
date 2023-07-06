@@ -1,9 +1,11 @@
 package repository
 
 import (
+	"DocumentAgreement/internal/adapters/db/cache_redis"
 	"DocumentAgreement/internal/adapters/db/postgres"
 	"DocumentAgreement/internal/adapters/entities"
 	"context"
+	"github.com/go-redis/redis"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -14,12 +16,19 @@ type Authorization interface {
 	Verify(ctx context.Context, tokens entities.Tokens) (entities.Tokens, error)
 }
 
-type Repository struct {
-	Authorization
+type AuthorizationCache interface {
+	TokenIsValid(ctx context.Context, tokens entities.Tokens) (bool, error)
+	SetTokenInvalid(ctx context.Context, tokens entities.Tokens) error
 }
 
-func NewRepository(db *sqlx.DB) *Repository {
+type Repository struct {
+	Authorization
+	AuthorizationCache
+}
+
+func NewRepository(db *sqlx.DB, client *redis.Client) *Repository {
 	return &Repository{
-		Authorization: postgres.NewAuthPostgres(db),
+		Authorization:      postgres.NewAuthPostgres(db),
+		AuthorizationCache: cache_redis.NewAuthRedis(client),
 	}
 }

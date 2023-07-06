@@ -23,10 +23,20 @@ type Authorization interface {
 	GetByCredentials(ctx context.Context, userAuth entities.UserAuth) (int, error)
 	IsLoginFree(ctx context.Context, userAuth entities.UserAuth) (bool, error)
 	Verify(ctx context.Context, tokens entities.Tokens) (entities.Tokens, error)
+	TokenIsValid(ctx context.Context, tokens entities.Tokens) (bool, error)
+	SetTokenInvalid(ctx context.Context, tokens entities.Tokens) error
 }
 
 type Service struct {
 	Authorization
+}
+
+func newClaims() jwt.MapClaims {
+	return jwt.MapClaims{
+		"exp":    0,
+		"iat":    0,
+		"userId": 0,
+	}
 }
 
 func New(repo *repository.Repository) *Service {
@@ -96,12 +106,8 @@ func (s *Service) Verify(ctx context.Context, tokens entities.Tokens) (entities.
 	}
 	//Если рефреш валиден - то генерируем новую пару токенов
 	//Достаем userId из рефреш токена
-	payload := jwt.MapClaims{
-		"exp":    0,
-		"iat":    0,
-		"userId": 0,
-	}
-	_, err = jwt.ParseWithClaims(tokens.RefreshToken, &payload, func(token *jwt.Token) (interface{}, error) {
+	payload := newClaims()
+	_, err = jwt.ParseWithClaims(tokens.RefreshToken, payload, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, errors.New("unexpected signing method")
 		}
@@ -114,7 +120,20 @@ func (s *Service) Verify(ctx context.Context, tokens entities.Tokens) (entities.
 	newTokens, err = s.createSession(userId)
 	return newTokens, nil
 }
+
+func (s *Service) TokenIsValid(ctx context.Context, tokens entities.Tokens) (bool, error) {
+	result, err := s.Authorization.TokenIsValid(ctx, tokens)
+	if err != nil {
+		return false, fmt.Errorf("%w", err)
+	}
+	return result, nil
+}
+
 func (s *Service) Logout(ctx context.Context, tokens entities.Tokens) error {
+	err := s.Authorization.SetTokenInvalid(ctx, tokens)
+	if err != nil {
+		return fmt.Errorf("%w", err.Error())
+	}
 	return nil
 }
 
@@ -134,11 +153,7 @@ func (s *Service) createSession(userId int) (entities.Tokens, error) {
 }
 
 func (s *Service) newToken(userId int, d time.Duration) (string, error) {
-	payload := jwt.MapClaims{
-		"exp":    time.Now().Add(d).Unix(),
-		"iat":    time.Now().Unix(),
-		"userId": userId,
-	}
+	payload := newClaims()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, payload)
 	res, err := token.SignedString([]byte(signingKey))
 	if err != nil {
@@ -148,12 +163,8 @@ func (s *Service) newToken(userId int, d time.Duration) (string, error) {
 }
 
 func verifyToken(input string) (bool, error) {
-	payload := jwt.MapClaims{
-		"exp":    0,
-		"iat":    0,
-		"userId": 0,
-	}
-	token, err := jwt.ParseWithClaims(input, &payload, func(token *jwt.Token) (interface{}, error) {
+	payload := newClaims()
+	token, err := jwt.ParseWithClaims(input, payload, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, errors.New("unexpected signing method")
 		}
@@ -168,85 +179,3 @@ func verifyToken(input string) (bool, error) {
 	}
 	return true, nil
 }
-
-/*
-func (s *Service) SignUp(userAuth entities.UserAuth) (int, error) {
-	status, err := s.Authorization.CreateUser(userAuth)
-	if err != nil {
-		return status, err
-	}
-	return status, nil
-}
-
-type tokenClaims struct {
-	jwt.StandardClaims
-	userId int `json:"userId"`
-}
-
-func (s *Service) SignIn(userAuth entities.UserAuth) (string, string, error) {
-	userId, err := s.Authorization.GetUser(userAuth)
-	if err != nil {
-		return "", "", err
-	}
-	if userId == 0 {
-		return "", "", nil
-	}
-	tokens, err := s.createSession(userId)
-	if err != nil {
-		return "", "", err
-	}
-	res, err := s.Authorization.UpdateSession(tokens.RefreshToken, time.Now().Add(refreshTokenTTL))
-	if err != nil {
-		return "", "", err
-	}
-	if res == true {
-		return tokens.AccessToken, tokens.RefreshToken, nil
-	}
-	return "", "", nil
-}
-
-func (s *Service) Verify(token string) (string, string, error) {
-	time, _ := s.Authorization.GetSession(token)
-	return "", time.String(), nil
-}
-
-func (s *Service) Logout() (bool, error) {
-	return true, nil
-}
-
-func (s *Service) createSession(userId int) (Tokens, error) {
-	var (
-		res Tokens
-		err error
-	)
-
-	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, &tokenClaims{
-		jwt.StandardClaims{
-			ExpiresAt: time.Now().Add(accessTokenTTL).Unix(),
-			IssuedAt:  time.Now().Unix(),
-		},
-		userId,
-	})
-	res.AccessToken, err = accessToken.SignedString([]byte(signingKey))
-	if err != nil {
-		return res, err
-	}
-
-	res.RefreshToken, err = s.newRefreshToken()
-	if err != nil {
-		return res, err
-	}
-	return res, nil
-}
-
-func (s *Service) newRefreshToken() (string, error) {
-	bytes := make([]byte, 32)
-	source := rand.NewSource(time.Now().Unix())
-	rand := rand.New(source)
-
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf("%x", bytes), nil
-}*/

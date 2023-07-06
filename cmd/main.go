@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+//@title DocumentAgreement API
+//@ version 1.0
+//@description API Server for DocumentAgreement Application
+
+//@host localhost:8080
+//@BasePath /
+
+//@securityDefinitions.apikey ApiKeyAuth
+//@in header
+//@name Authorization
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer cancel()
